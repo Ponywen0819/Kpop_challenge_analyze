@@ -1,0 +1,7 @@
+lib/*
+
+*.html
+*.xlsx
+*.csv
+
+.DS_Store
