@@ -102,6 +102,7 @@ def find_score(name, scores, reverse=True):
     sorted_cop = sorted(cop.items(), key=lambda x: x[1], reverse=reverse)
     return sorted_cop
 
+
 def recommend(G, name, threshold=1):
     # 計算這個 idol 的 link prediction 分數
     if name not in G:
