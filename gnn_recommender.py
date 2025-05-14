@@ -1,305 +1,237 @@
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv
+from torch_geometric.nn import GCNConv, SAGEConv
 from torch_geometric.data import Data
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import precision_score, recall_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import LabelEncoder
 from datetime import datetime
-import matplotlib.pyplot as plt
+import networkx as nx
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 class GNNRecommender(torch.nn.Module):
-    def __init__(self, num_features, hidden_channels, num_heads=4, edge_features_dim=None):
+    def __init__(self, num_features, hidden_channels=64):
         super(GNNRecommender, self).__init__()
-        self.conv1 = GATConv(num_features, hidden_channels, heads=num_heads)
-        self.conv2 = GATConv(hidden_channels * num_heads, hidden_channels, heads=1)
-        self.final_layer = torch.nn.Linear(hidden_channels, num_features)
+        self.conv1 = GCNConv(num_features, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.conv3 = GCNConv(hidden_channels, num_features)  # 最後一層輸出維度改回原始特徵維度
         
-        if edge_features_dim is not None:
-            self.edge_mlp = torch.nn.Sequential(
-                torch.nn.Linear(edge_features_dim, hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Linear(hidden_channels, hidden_channels)
-            )
-        
-    def forward(self, x, edge_index, edge_attr=None):
-        if edge_attr is not None and hasattr(self, 'edge_mlp'):
-            edge_attr = self.edge_mlp(edge_attr)
-        
-        x = F.relu(self.conv1(x, edge_index, edge_attr))
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
         x = F.dropout(x, p=0.2, training=self.training)
-        x = self.conv2(x, edge_index, edge_attr)
-        x = self.final_layer(x)
+        x = self.conv2(x, edge_index)
+        x = F.relu(x)
+        x = self.conv3(x, edge_index)  # 輸出維度與輸入相同
         return x
 
-def load_data():
-    # 加載節點數據
-    nodes_df = pd.read_csv('data/node_list.csv')
+def prepare_graph_data(collaboration_df, time_window=60, split_timestamp=None):
+    """
+    準備圖神經網絡所需的數據，並根據時間戳分割訓練集和測試集
+    """
+    # 創建節點編碼器
+    node_encoder = LabelEncoder()
     
-    # 創建節點ID到索引的映射
-    node_to_idx = {node: idx for idx, node in enumerate(nodes_df['node'])}
-    
-    # 加載合作關係數據
-    collab_df = pd.read_csv('data/collaboration_videos.csv')
-    
-    # 將時間戳轉換為datetime
-    collab_df['timestamp'] = pd.to_datetime(collab_df['timestamp'], unit='s')
-    
-    # 設置測試集時間閾值
-    test_threshold = pd.Timestamp('2025-01-01')
-    
-    # 分割訓練集和測試集
-    train_df = collab_df[collab_df['timestamp'] < test_threshold]
-    test_df = collab_df[collab_df['timestamp'] >= test_threshold]
-    
-    print(f"訓練集大小: {len(train_df)}")
-    print(f"測試集大小: {len(test_df)}")
-    print(f"訓練集時間範圍: {train_df['timestamp'].min()} 到 {train_df['timestamp'].max()}")
-    print(f"測試集時間範圍: {test_df['timestamp'].min()} 到 {test_df['timestamp'].max()}")
+    # 獲取所有唯一的藝人
+    all_artists = pd.concat([collaboration_df['source'], collaboration_df['target']]).unique()
+    node_encoder.fit(all_artists)
     
     # 創建節點特徵矩陣
-    num_nodes = len(nodes_df)
-    x = torch.eye(num_nodes)
+    num_nodes = len(all_artists)
+    x = torch.eye(num_nodes)  # 使用 one-hot 編碼作為初始特徵
     
-    # 標準化數值特徵
-    scaler = StandardScaler()
-    numeric_features = ['views', 'likes', 'comments']
-    train_df[numeric_features] = scaler.fit_transform(train_df[numeric_features])
-    test_df[numeric_features] = scaler.transform(test_df[numeric_features])
+    # 分割訓練集和測試集
+    if split_timestamp:
+        train_df = collaboration_df[collaboration_df['timestamp'] < split_timestamp]
+        test_df = collaboration_df[collaboration_df['timestamp'] >= split_timestamp]
+    else:
+        train_df = collaboration_df
+        test_df = pd.DataFrame()
     
-    # 處理時間特徵
-    train_df['time_feature'] = (train_df['timestamp'] - train_df['timestamp'].min()).dt.total_seconds()
-    test_df['time_feature'] = (test_df['timestamp'] - train_df['timestamp'].min()).dt.total_seconds()
-    
-    train_df['time_feature'] = scaler.fit_transform(train_df[['time_feature']])
-    test_df['time_feature'] = scaler.transform(test_df[['time_feature']])
-    
-    # 創建訓練集邊索引和邊特徵
+    # 創建訓練集的邊索引和屬性
     train_edge_index = []
-    train_edge_features = []
+    train_edge_attr = []
     
+    # 處理訓練數據
     for _, row in train_df.iterrows():
-        source = node_to_idx[row['source']]
-        target = node_to_idx[row['target']]
-        train_edge_index.append([source, target])
+        artist1_idx = node_encoder.transform([row['source']])[0]
+        artist2_idx = node_encoder.transform([row['target']])[0]
         
-        edge_feature = []
-        for feature in numeric_features:
-            edge_feature.append(float(row[feature]))
-        edge_feature.append(float(row['time_feature']))
-        train_edge_features.append(edge_feature)
-    
-    # 創建測試集邊索引和邊特徵
-    test_edges = []
-    test_edge_features = []
-    
-    for _, row in test_df.iterrows():
-        source = node_to_idx[row['source']]
-        target = node_to_idx[row['target']]
-        test_edges.append([source, target])
+        # 添加雙向邊
+        train_edge_index.append([artist1_idx, artist2_idx])
+        train_edge_index.append([artist2_idx, artist1_idx])
         
-        edge_feature = []
-        for feature in numeric_features:
-            edge_feature.append(float(row[feature]))
-        edge_feature.append(float(row['time_feature']))
-        test_edge_features.append(edge_feature)
+        # 邊的權重（這裡使用時間衰減）
+        current_time = datetime.now().timestamp()
+        time_diff = (current_time - row['timestamp']) / (24 * 3600)  # 轉換為天
+        weight = np.exp(-time_diff / time_window)
+        train_edge_attr.extend([weight, weight])
     
-    # 轉換為張量
     train_edge_index = torch.tensor(train_edge_index, dtype=torch.long).t().contiguous()
-    train_edge_attr = torch.tensor(train_edge_features, dtype=torch.float)
-    test_edges = torch.tensor(test_edges, dtype=torch.long)
-    test_edge_attr = torch.tensor(test_edge_features, dtype=torch.float)
+    train_edge_attr = torch.tensor(train_edge_attr, dtype=torch.float)
     
-    # 創建訓練數據
     train_data = Data(x=x, edge_index=train_edge_index, edge_attr=train_edge_attr)
     
-    return train_data, test_edges, test_edge_attr, node_to_idx
-
-def calculate_metrics(model, data, test_edges, test_edge_attr, k_values=[1, 3, 5, 10]):
-    model.eval()
-    with torch.no_grad():
-        embeddings = model(data.x, data.edge_index, data.edge_attr)
+    # 如果有測試集，也創建測試數據
+    test_data = None
+    if not test_df.empty:
+        test_edge_index = []
+        test_edge_attr = []
         
-        # 計算所有節點對之間的相似度
-        similarities = torch.matmul(embeddings, embeddings.t())
+        for _, row in test_df.iterrows():
+            artist1_idx = node_encoder.transform([row['source']])[0]
+            artist2_idx = node_encoder.transform([row['target']])[0]
+            
+            test_edge_index.append([artist1_idx, artist2_idx])
+            test_edge_index.append([artist2_idx, artist1_idx])
+            
+            current_time = datetime.now().timestamp()
+            time_diff = (current_time - row['timestamp']) / (24 * 3600)  # 轉換為天
+            weight = np.exp(-time_diff / time_window)
+            test_edge_attr.extend([weight, weight])
         
-        # 初始化評估指標
-        hit_rates = {k: 0.0 for k in k_values}
-        mrr = 0.0
-        total_samples = len(test_edges)
+        test_edge_index = torch.tensor(test_edge_index, dtype=torch.long).t().contiguous()
+        test_edge_attr = torch.tensor(test_edge_attr, dtype=torch.float)
         
-        for i, (source, target) in enumerate(test_edges):
-            # 獲取源節點的所有預測分數
-            pred_scores = similarities[source]
-            
-            # 排除自身
-            pred_scores[source] = float('-inf')
-            
-            # 獲取排序後的索引
-            _, indices = torch.sort(pred_scores, descending=True)
-            
-            # 計算目標節點的排名
-            rank = (indices == target).nonzero().item() + 1
-            
-            # 更新 MRR
-            mrr += 1.0 / rank
-            
-            # 更新 Hit Rate
-            for k in k_values:
-                if rank <= k:
-                    hit_rates[k] += 1.0
-        
-        # 計算平均值
-        mrr /= total_samples
-        for k in k_values:
-            hit_rates[k] /= total_samples
-            
-        return hit_rates, mrr
-
-def evaluate_test_set(model, train_data, test_edges, test_edge_attr, node_to_idx, k_values=[1, 3, 5, 10]):
-    """
-    對測試集進行詳細的效能評估
-    """
-    model.eval()
-    with torch.no_grad():
-        # 獲取節點嵌入
-        embeddings = model(train_data.x, train_data.edge_index, train_data.edge_attr)
-        
-        # 計算所有節點對之間的相似度
-        similarities = torch.matmul(embeddings, embeddings.t())
-        
-        # 初始化評估指標
-        hit_rates = {k: 0.0 for k in k_values}
-        mrr = 0.0
-        total_samples = len(test_edges)
-        
-        # 用於繪製ROC曲線的數據
-        all_scores = []
-        all_labels = []
-        
-        # 用於記錄每個K值的詳細結果
-        detailed_results = {k: {'hits': [], 'misses': []} for k in k_values}
-        
-        for i, (source, target) in enumerate(test_edges):
-            # 獲取源節點的所有預測分數
-            pred_scores = similarities[source]
-            
-            # 排除自身
-            pred_scores[source] = float('-inf')
-            
-            # 獲取排序後的索引和分數
-            scores, indices = torch.sort(pred_scores, descending=True)
-            
-            # 計算目標節點的排名
-            rank = (indices == target).nonzero().item() + 1
-            
-            # 更新 MRR
-            mrr += 1.0 / rank
-            
-            # 更新 Hit Rate 並記錄詳細結果
-            for k in k_values:
-                if rank <= k:
-                    hit_rates[k] += 1.0
-                    detailed_results[k]['hits'].append((source.item(), target.item(), rank))
-                else:
-                    detailed_results[k]['misses'].append((source.item(), target.item(), rank))
-            
-            # 收集ROC曲線數據
-            all_scores.extend(scores.cpu().numpy())
-            all_labels.extend([1 if idx == target else 0 for idx in indices])
-        
-        # 計算平均值
-        mrr /= total_samples
-        for k in k_values:
-            hit_rates[k] /= total_samples
-        
-        # 打印詳細結果
-        print("\n=== 測試集評估結果 ===")
-        print(f"總測試樣本數: {total_samples}")
-        print(f"MRR: {mrr:.4f}")
-        for k in k_values:
-            print(f"\nTop-{k} 結果:")
-            print(f"Hit Rate: {hit_rates[k]:.4f}")
-            print(f"命中數: {len(detailed_results[k]['hits'])}")
-            print(f"未命中數: {len(detailed_results[k]['misses'])}")
-            
-        return hit_rates, mrr, detailed_results
-
-def train_model(model, train_data, test_edges, test_edge_attr, optimizer, epochs=200):
-    model.train()
-    best_mrr = 0.0
-    best_model_state = None
+        test_data = Data(x=x, edge_index=test_edge_index, edge_attr=test_edge_attr)
     
+    return train_data, test_data, node_encoder, test_df
+
+def train_model(model, data, optimizer, epochs=200):
+    """
+    訓練 GNN 模型
+    """
+    model.train()
     for epoch in range(epochs):
         optimizer.zero_grad()
-        out = model(train_data.x, train_data.edge_index, train_data.edge_attr)
-        loss = F.mse_loss(out, train_data.x)
+        out = model(data.x, data.edge_index)
+        # 使用重建損失，確保輸入和輸出維度相同
+        loss = F.mse_loss(out, data.x)
         loss.backward()
         optimizer.step()
-        
         if epoch % 10 == 0:
-            # 計算評估指標
-            hit_rates, mrr = calculate_metrics(model, train_data, test_edges, test_edge_attr)
-            print(f'Epoch {epoch}:')
-            print(f'Loss = {loss.item():.4f}')
-            print(f'MRR = {mrr:.4f}')
-            for k, hr in hit_rates.items():
-                print(f'Hit Rate@{k} = {hr:.4f}')
-            print('-------------------')
-            
-            # 保存最佳模型
-            if mrr > best_mrr:
-                best_mrr = mrr
-                best_model_state = model.state_dict().copy()
-    
-    # 載入最佳模型
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    
-    return model
+            print(f'Epoch {epoch}: Loss = {loss.item():.4f}')
 
-def get_recommendations(model, data, node_idx, top_k=5):
+def evaluate_model(model, test_data, test_df, node_encoder, top_k=5):
+    """
+    評估模型在測試集上的表現
+    """
     model.eval()
     with torch.no_grad():
-        embeddings = model(data.x, data.edge_index, data.edge_attr)
-        node_embedding = embeddings[node_idx]
+        embeddings = model(test_data.x, test_data.edge_index)
+    
+    # 計算每個藝人的推薦
+    all_recommendations = {}
+    for artist in test_df['source'].unique():
+        artist_idx = node_encoder.transform([artist])[0]
+        artist_embedding = embeddings[artist_idx]
         
-        # 計算與其他節點的相似度
-        similarities = F.cosine_similarity(node_embedding.unsqueeze(0), embeddings)
-        
-        # 獲取top-k推薦
+        similarities = F.cosine_similarity(artist_embedding.unsqueeze(0), embeddings)
         top_k_values, top_k_indices = torch.topk(similarities, k=top_k+1)
         
-        return top_k_indices[1:].tolist()  # 排除自身
+        recommendations = []
+        for idx in top_k_indices[1:]:
+            rec_artist = node_encoder.inverse_transform([idx])[0]
+            recommendations.append(rec_artist)
+        
+        all_recommendations[artist] = recommendations
+    
+    # 計算評估指標
+    true_positives = 0
+    total_recommendations = 0
+    total_actual_collaborations = 0
+    reciprocal_ranks = []  # 用於計算 MRR
+    
+    for _, row in test_df.iterrows():
+        source = row['source']
+        target = row['target']
+        
+        if source in all_recommendations:
+            recommendations = all_recommendations[source]
+            if target in recommendations:
+                true_positives += 1
+                # 計算 MRR
+                rank = recommendations.index(target) + 1
+                reciprocal_ranks.append(1.0 / rank)
+            total_recommendations += len(recommendations)
+            total_actual_collaborations += 1
+    
+    precision = true_positives / total_recommendations if total_recommendations > 0 else 0
+    recall = true_positives / total_actual_collaborations if total_actual_collaborations > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    mrr = np.mean(reciprocal_ranks) if reciprocal_ranks else 0
+    
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'mrr': mrr
+    }
+
+def get_recommendations(model, data, node_encoder, artist_name, top_k=5):
+    """
+    為指定藝人獲取推薦
+    """
+    model.eval()
+    with torch.no_grad():
+        embeddings = model(data.x, data.edge_index)
+        
+    # 獲取目標藝人的嵌入
+    artist_idx = node_encoder.transform([artist_name])[0]
+    artist_embedding = embeddings[artist_idx]
+    
+    # 計算與其他藝人的相似度
+    similarities = F.cosine_similarity(artist_embedding.unsqueeze(0), embeddings)
+    
+    # 獲取 top-k 推薦
+    top_k_values, top_k_indices = torch.topk(similarities, k=top_k+1)
+    
+    # 轉換回藝人名字
+    recommendations = []
+    for idx in top_k_indices[1:]:  # 跳過第一個（自己）
+        artist_name = node_encoder.inverse_transform([idx])[0]
+        recommendations.append(artist_name)
+    
+    return recommendations
 
 def main():
-    # 加載數據
-    train_data, test_edges, test_edge_attr, node_to_idx = load_data()
+    # 讀取數據
+    df = pd.read_csv('data/collaboration_videos.csv')
+    
+    # 將時間戳轉換為浮點數
+    df['timestamp'] = df['timestamp'].astype(float)
+    
+    # 設置分割時間戳（2025-01-01 的 Unix 時間戳）
+    split_timestamp = datetime(2025, 1, 1).timestamp()
+    
+    # 準備圖數據
+    train_data, test_data, node_encoder, test_df = prepare_graph_data(df, split_timestamp=split_timestamp)
     
     # 初始化模型
-    model = GNNRecommender(
-        num_features=train_data.x.size(1),
-        hidden_channels=64,
-        edge_features_dim=train_data.edge_attr.size(1) if hasattr(train_data, 'edge_attr') else None
-    )
-    
-    # 設置優化器
+    model = GNNRecommender(num_features=train_data.x.size(1))
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     
     # 訓練模型
-    model = train_model(model, train_data, test_edges, test_edge_attr, optimizer)
+    print("開始訓練模型...")
+    train_model(model, train_data, optimizer)
     
-    # 在測試集上進行詳細評估
-    hit_rates, mrr, detailed_results = evaluate_test_set(
-        model, train_data, test_edges, test_edge_attr, node_to_idx
-    )
+    # 評估模型
+    print("\n開始評估模型...")
+    metrics = evaluate_model(model, test_data, test_df, node_encoder)
+    print("\n評估結果：")
+    print(f"Precision: {metrics['precision']:.4f}")
+    print(f"Recall: {metrics['recall']:.4f}")
+    print(f"F1 Score: {metrics['f1_score']:.4f}")
+    print(f"MRR: {metrics['mrr']:.4f}")
     
-    # 示例：為某個節點獲取推薦
-    test_node = 0  # 示例節點索引
-    recommendations = get_recommendations(model, train_data, test_node)
-    print(f"\nRecommendations for node {test_node}: {recommendations}")
+    # 為一些藝人生成推薦
+    print("\n為測試集中的一些藝人生成推薦：")
+    test_artists = test_df['source'].unique()[:3]  # 取前三個藝人作為示例
+    for artist in test_artists:
+        recommendations = get_recommendations(model, test_data, node_encoder, artist)
+        print(f"\n為 {artist} 的推薦：")
+        for i, rec in enumerate(recommendations, 1):
+            print(f"{i}. {rec}")
 
 if __name__ == "__main__":
     main() 
