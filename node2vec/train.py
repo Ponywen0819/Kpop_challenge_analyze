@@ -135,7 +135,7 @@ def get_dataloader(dataset, batch_size):
     return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 def train():
-  device = "mps"
+  device = "cuda"
   
   dataset = get_dataset()
   dataloader = get_dataloader(dataset, batch_size=256)

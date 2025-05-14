@@ -3,17 +3,16 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-idol_name_sheet = pd.read_excel("./data/K-POP藝人清單.xlsx", sheet_name = "idols")
-
+idol_list = pd.read_csv("./data/K-POP藝人清單.csv")
 with open("./data/v2-kpop-challenge-shorts.json", 'r', encoding='utf-8') as f:
     youtube_data = json.load(f)    
 
 youtube_data = { f.upper(): youtube_data[f] for f in youtube_data }
-group_name_list = set([ f.upper() for f in idol_name_sheet["group (english)"].tolist()])
+group_name_list = set([ f.upper() for f in idol_list["group (english)"].tolist()])
 
 group_member_dict = {}
 
-for _, idol in idol_name_sheet.iterrows():
+for _, idol in idol_list.iterrows():
     group_belong_to = idol["group (english)"]
 
     # 為了方便查找，將團體名稱轉換為小寫
@@ -59,7 +58,7 @@ def getMembersInVideo(tags, group_list, group_member_dict):
         for group in group_list:
             member = findGroupMember(tag[1:].upper(), group_member_dict[group])
             if member is not None:
-                members_in_video.add((group, member))
+                members_in_video.add((group,member))
     return list(members_in_video)
 
 # 定義 percentile rank 函數
@@ -103,11 +102,9 @@ def get_collaboration_videos(source_group, group_data, group_member_dict):
         
         payload = {
             "timestamp": datetime.strptime(video['upload_time'], "%Y-%m-%d %H:%M:%S").timestamp(),
-
             "views": views_ranks[i],
             "likes": likes_ranks[i],
             "comments": comments_ranks[i],
-
             "video_id": video['video_id']
         }
 
@@ -117,16 +114,16 @@ def get_collaboration_videos(source_group, group_data, group_member_dict):
                     if source == target:
                         continue
                     collaboration_videos.append({
-                        "source":source,
-                        "target":target,
+                        "source":f"{source[0]}_{source[1]}",
+                        "target":f"{target[0]}_{target[1]}",
                         **payload
                     })
         else:
             for source in source_members:
                 for target in target_members:
                     collaboration_videos.append({
-                        "source":source,
-                        "target":target,
+                        "source":f"{source[0]}_{source[1]}",
+                        "target":f"{target[0]}_{target[1]}",
                         **payload
                     })
 
@@ -144,6 +141,7 @@ for group in group_name_list:
 
 collaboration_videos = sorted(collaboration_videos, key=lambda x: x['timestamp'])
 
-with open('data/collaboration_videos.json', 'w', encoding='utf-8') as f:
-    json.dump(collaboration_videos, f, ensure_ascii=False, indent=4)
+df = pd.DataFrame(collaboration_videos)
+
+df.to_csv('data/collaboration_videos.csv', index=False, encoding='utf-8')
 len(collaboration_videos)
