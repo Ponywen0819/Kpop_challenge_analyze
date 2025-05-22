@@ -302,9 +302,9 @@ def generate_predictions(model, test_data, test_df, node_encoder, top_k=10):
         
         # 轉換回藝人名字
         recommendations = []
-        for idx in top_k_indices[1:]:  # 跳過第一個（自己）
+        for i,idx in enumerate(top_k_indices[1:]):  # 跳過第一個（自己）
             rec_artist = node_encoder.inverse_transform([idx])[0]
-            recommendations.append(rec_artist)
+            recommendations.append(F"{rec_artist} ({top_k_values[i]:.4f})")
         
         # 獲取該藝人的實際合作者
         actual_collaborators = test_df[test_df['source'] == artist]['target'].unique()
@@ -325,7 +325,7 @@ def generate_predictions(model, test_data, test_df, node_encoder, top_k=10):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    output_file = os.path.join(output_dir, 'predictions.csv')
+    output_file = os.path.join(output_dir, 'predictions_v.csv')
     predictions_df.to_csv(output_file, index=False)
     print(f"\n預測結果已保存至: {output_file}")
     

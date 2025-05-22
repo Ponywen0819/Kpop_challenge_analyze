@@ -32,7 +32,7 @@ class GNNRecommender(torch.nn.Module):
         x = self.final_layer(x)  # 將輸出映射回原始特徵空間
         return x
 
-def load_data():
+def load_data(cutoff_date, is_train=True):
     # 加載節點數據
     nodes_df = pd.read_csv('data/node_list.csv')
     
@@ -41,7 +41,10 @@ def load_data():
     
     # 加載合作關係數據
     collab_df = pd.read_csv('data/collaboration_videos.csv')
-    
+    if is_train:
+        collab_df = collab_df[collab_df['timestamp'] < pd.Timestamp(cutoff_date).timestamp()]
+    else:
+        collab_df = collab_df[collab_df['timestamp'] >= pd.Timestamp(cutoff_date).timestamp()]
     # 創建節點特徵矩陣
     num_nodes = len(nodes_df)
     x = torch.eye(num_nodes)  # 使用one-hot編碼作為初始特徵
@@ -169,26 +172,39 @@ def get_recommendations(model, data, node_idx, top_k=5):
         
         return top_k_indices[1:].tolist()  # 排除自身
 
+def evaluate_model(model, data, test_edges, k_values=[5,10]):
+    hit_rates, mrr = calculate_metrics(model, data, test_edges, k_values)
+    return hit_rates, mrr
+
 def main():
     # 加載數據
-    data, node_to_idx = load_data()
+    cutoff_date = '2025-01-01'
+    train_data, node_to_idx = load_data(cutoff_date=cutoff_date, is_train=True)
+    test_data, node_to_idx = load_data(cutoff_date=cutoff_date, is_train=False)
     
     # 初始化模型
     model = GNNRecommender(
-        num_features=data.x.size(1),
+        num_features=train_data.x.size(1),
         hidden_channels=64,
-        edge_features_dim=data.edge_attr.size(1) if hasattr(data, 'edge_attr') else None
+        edge_features_dim=train_data.edge_attr.size(1) if hasattr(train_data, 'edge_attr') else None
     )
     
     # 設置優化器
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     
     # 訓練模型
-    train_model(model, data, optimizer)
+    train_model(model, train_data, optimizer)
+    
+    
+    # 評估模型
+    hit_rates, mrr = evaluate_model(model, test_data, test_data.edge_index.t().tolist())
+    print(f"MRR: {mrr:.4f}")
+    for k, hr in hit_rates.items():
+        print(f"Hit Rate@{k}: {hr:.4f}")
     
     # 示例：為某個節點獲取推薦
     test_node = 0  # 示例節點索引
-    recommendations = get_recommendations(model, data, test_node)
+    recommendations = get_recommendations(model, train_data, test_node)
     print(f"Recommendations for node {test_node}: {recommendations}")
 
 if __name__ == "__main__":

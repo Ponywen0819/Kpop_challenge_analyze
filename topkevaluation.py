@@ -3,17 +3,19 @@ import numpy as np
 from sklearn.metrics import precision_score, recall_score, f1_score
 import argparse
 
-def calculate_top_k_metrics(df, k=10):
+def calculate_top_k_metrics(file_path, k=10):
     """
     计算 top-k 的评估指标
     
     参数:
-    df: DataFrame，包含预测结果
+    file_path: str，包含预测结果的 CSV 文件路径
     k: int，top-k 的值，默认为 10
     
     返回:
     tuple: (准确率, MRR)
     """
+    df = pd.read_csv(file_path)
+    
     y_pred = []  # 用于存储准确率
     reciprocal_ranks = []  # 用于存储 MRR
 
@@ -55,11 +57,8 @@ def main():
     args = parser.parse_args()
     
     try:
-        # 读取数据
-        df = pd.read_csv(args.file)
-        
         # 计算 top-k 指标
-        accuracy, mrr = calculate_top_k_metrics(df, k=args.k)
+        accuracy, mrr = calculate_top_k_metrics(args.file, k=args.k)
         
         # 打印结果
         print(f"Top-{args.k} 评估指标:")
