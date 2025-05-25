@@ -116,8 +116,7 @@ def get_dataset():
           sample["label"] = 0
         
         data.append(sample)
-        
-        
+    
     positive_data = [sample for sample in data if sample["label"] == 1]
     negative_data = [sample for sample in data if sample["label"] == 0]
     
